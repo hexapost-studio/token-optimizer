@@ -277,7 +277,7 @@ def cmd_analyze(logfile: str):
 
 def cmd_strategies():
     """Affiche les stratégies d'optimisation."""
-    print(f"""
+    print("""
 {'='*60}
   STRATÉGIES D'OPTIMISATION — DeepSeek API
 {'='*60}
