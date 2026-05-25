@@ -369,13 +369,13 @@ Hit rate réel = prompt_cache_hit_tokens / prompt_tokens
 {'='*60}
 
 Sans optimisation (0% cache hit) :
-  1000 appels × 10K tokens = 10M tokens
-  → ${10 * PRICING['deepseek-v4-pro']['input_cache_miss'] / 1:.2f} (input)
+  1000 appels x 10K tokens = 10M tokens
+  Cout input: $4.35 (cache miss)
 
 Avec optimisation (80% cache hit) :
   2M cache miss + 8M cache hit
-  → ${2 * 0.435 + 8 * 0.003625:.2f} (input)
-  → Économie : ~{int((1 - (2*0.435 + 8*0.003625)/(10*0.435))*100)}%
+  Cout input: $0.90
+  Economie: environ 79%
 
 """)
 
