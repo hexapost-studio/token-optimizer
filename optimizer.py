@@ -313,6 +313,24 @@ def cmd_strategies():
    ├─ Supprimer les messages redondants
    └─ Utiliser JSON mode (plus compact que markdown)
 
+6. CACHE WARM-UP (nouveau)
+   ├─ Le cache prend quelques secondes à construire
+   ├─ Premier appel = toujours cache miss
+   ├─ Attendre 2-3 secondes après le 1er appel avant le 2e
+   └─ Le cache est auto-clear après heures/jours d'inactivité
+
+7. MESURER LE CACHE HIT RÉEL
+   ├─ La réponse API contient prompt_cache_hit_tokens
+   ├─ La réponse API contient prompt_cache_miss_tokens
+   ├─ hit_rate = hit_tokens / (hit_tokens + miss_tokens)
+   └─ Logger ces valeurs pour suivre l'efficacité réelle
+
+8. BEST-EFFORT (nuance importante)
+   ├─ Le cache ne garantit PAS 100% de hit rate
+   ├─ Système \"best-effort\" — dépend de la charge serveur
+   ├─ Les prefixes très longs peuvent ne pas être cachés
+   └─ Toujours prévoir le pire cas (cache miss) dans le budget
+
 6. CHOISIR LE BON MODÈLE
    ├─ deepseek-v4-flash : tâches simples, 3-5x moins cher
    ├─ deepseek-v4-pro  : tâches complexes, raisonnement
@@ -322,6 +340,29 @@ def cmd_strategies():
    ├─ Combiner plusieurs questions en un seul appel
    ├─ Au lieu de 3 appels de 1000 tokens → 1 appel de 2000
    └─ Économie : 3x moins de cache misses
+
+8. CHAT PREFIX COMPLETION (Beta)
+   ├─ Nouvelle feature DeepSeek (Beta)
+   ├─ Permet de pré-remplir la réponse de l'assistant
+   ├─ Utile pour forcer un format de sortie sans JSON mode
+   └─ Économise des tokens de raisonnement
+
+{'='*60}
+  MESURE RÉELLE DU CACHE HIT
+{'='*60}
+
+La réponse API DeepSeek contient :
+  usage.prompt_cache_hit_tokens  → tokens en cache hit
+  usage.prompt_cache_miss_tokens → tokens en cache miss
+  usage.prompt_tokens            → total input tokens
+  usage.completion_tokens        → output tokens
+
+Hit rate réel = prompt_cache_hit_tokens / prompt_tokens
+
+  Pour logger automatiquement :
+    curl -s ... | jq '.usage'
+    -> {"prompt_tokens":1200,"prompt_cache_hit_tokens":800,
+       "prompt_cache_miss_tokens":400,"completion_tokens":300}
 
 {'='*60}
   ESTIMATION D'ÉCONOMIES (deepseek-v4-pro)
