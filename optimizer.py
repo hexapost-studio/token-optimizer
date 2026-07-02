@@ -7,7 +7,7 @@ Usage:
   python3 optimizer.py analyze <logfile>     # Analyse un fichier de logs API
   python3 optimizer.py simulate <prompt>     # Simule le coût d'un prompt
   python3 optimizer.py compare <a> <b>      # Compare 2 variantes de prompt
-  python3 optimizer.py track [--days 30]     # Suivi des coûts (via API key)
+  python3 optimizer.py count <text|file>     # Comptage exact de tokens
   python3 optimizer.py strategies            # Affiche les stratégies
 
 Pricing source: https://api-docs.deepseek.com/quick_start/pricing
@@ -20,6 +20,40 @@ import time
 import os
 import re
 from collections import defaultdict
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OFFICIAL DEEPSEEK TOKENIZER (exact token counting)
+# Download: pip install transformers
+# Tokenizer files: ~/Downloads/deepseek_v3_tokenizer/
+# ══════════════════════════════════════════════════════════════════════════════
+
+_TOKENIZER = None
+_TOKENIZER_DIR = os.path.expanduser("~/Downloads/deepseek_v3_tokenizer")
+
+def _load_tokenizer():
+    """Lazy-load the official DeepSeek V3 tokenizer."""
+    global _TOKENIZER
+    if _TOKENIZER is not None:
+        return _TOKENIZER
+    try:
+        import transformers
+        if os.path.isdir(_TOKENIZER_DIR):
+            _TOKENIZER = transformers.AutoTokenizer.from_pretrained(
+                _TOKENIZER_DIR, trust_remote_code=True
+            )
+        else:
+            _TOKENIZER = False  # Sentinel: tried, not found
+    except Exception:
+        _TOKENIZER = False
+    return _TOKENIZER
+
+def count_tokens(text: str) -> int:
+    """Exact token count using the official DeepSeek tokenizer.
+    Falls back to character-based estimation if tokenizer unavailable."""
+    tok = _load_tokenizer()
+    if tok:
+        return len(tok.encode(text))
+    return estimate_tokens(text)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PRICING — DeepSeek API (per 1M tokens)
@@ -35,13 +69,33 @@ PRICING = {
         "max_output":       384_000,
     },
     "deepseek-v4-pro": {
-        "input_cache_hit":  0.003625,   # Promo 75% off (normal: $0.0145)
-        "input_cache_miss": 0.435,      # Promo 75% off (normal: $1.74)
-        "output":           0.87,       # Promo 75% off (normal: $3.48)
+        "input_cache_hit":  0.003625,   # Promo -75% (normal: $0.0145)
+        "input_cache_miss": 0.435,      # Promo -75% (normal: $1.74)
+        "output":           0.87,       # Promo -75% (normal: $3.48)
         "context":          1_000_000,
         "max_output":       384_000,
     },
 }
+
+# Prix NORMaux (post-promo, après le 31/05/2026)
+PRICING_NORMAL = {
+    "deepseek-v4-flash": {
+        "input_cache_hit":  0.0028,    # Inchangé
+        "input_cache_miss": 0.14,      # Inchangé
+        "output":           0.28,
+    },
+    "deepseek-v4-pro": {
+        "input_cache_hit":  0.0145,
+        "input_cache_miss": 1.74,
+        "output":           3.48,
+    },
+}
+
+# Note: DeepSeek reasoning_effort mapping
+# "none"/"minimal" → thinking OFF (use this for Flash)
+# "low"/"medium"/"high" → all map to "high" (same cost)
+# "xhigh"/"max" → "max" (most expensive)
+# Thinking tokens: NOT cacheable, cost same as output tokens
 
 # Cache prefix unit size (estimated — DeepSeek doesn't publish exact value)
 # Based on Sliding Window Attention, cache units are ~4K-8K tokens each
@@ -145,7 +199,7 @@ def cmd_simulate(model: str, prompt: str, system: str = ""):
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
     
-    input_tokens = sum(estimate_tokens(json.dumps(m)) for m in messages)
+    input_tokens = sum(count_tokens(json.dumps(m)) for m in messages)
     # Estimer output (typiquement 2-4x l'input pour une réponse normale)
     output_tokens = min(input_tokens * 2, pricing["max_output"])
     
@@ -165,7 +219,7 @@ def cmd_simulate(model: str, prompt: str, system: str = ""):
     
     # Appels suivants (cache hits sur le system prompt)
     if system:
-        system_tokens = estimate_tokens(json.dumps({"role": "system", "content": system}))
+        system_tokens = count_tokens(json.dumps({"role": "system", "content": system}))
         input_hit = system_tokens
         input_miss = input_tokens - system_tokens
     else:
@@ -190,8 +244,8 @@ def cmd_compare(model: str, prompt_a: str, prompt_b: str):
     """Compare 2 variantes de prompt."""
     pricing = PRICING.get(model, PRICING["deepseek-v4-flash"])
     
-    tokens_a = estimate_tokens(prompt_a)
-    tokens_b = estimate_tokens(prompt_b)
+    tokens_a = count_tokens(prompt_a)
+    tokens_b = count_tokens(prompt_b)
     
     diff = tokens_b - tokens_a
     pct = (diff / tokens_a * 100) if tokens_a > 0 else 0
@@ -275,6 +329,46 @@ def cmd_analyze(logfile: str):
             print(f"    {m}: {c} appels\n")
 
 
+def cmd_count(target: str):
+    """Comptage exact de tokens via le tokenizer officiel DeepSeek V3."""
+    if os.path.isfile(target):
+        with open(target) as f:
+            text = f.read()
+        source = f"fichier: {target}"
+    else:
+        text = target
+        source = "texte direct"
+    
+    tok = _load_tokenizer()
+    exact = tok and True or False
+    
+    tokens_exact = count_tokens(text) if tok else None
+    tokens_est = estimate_tokens(text)
+    chars = len(text)
+    
+    print(f"\n{'='*60}")
+    print(f"  COMPTAGE DE TOKENS — {source}")
+    print(f"{'='*60}\n")
+    print(f"  📝 Caractères     : {chars:,}")
+    
+    if exact:
+        print(f"  🎯 Tokens (EXACT)  : {tokens_exact:,} (tokenizer officiel DeepSeek V3)")
+        error = abs(tokens_exact - tokens_est) / tokens_exact * 100
+        print(f"  📊 Tokens (estimé) : {tokens_est:,} (erreur: {error:.1f}%)")
+        print(f"  📐 Ratio char/tok : {chars/tokens_exact:.1f}")
+    else:
+        print(f"  📊 Tokens (estimé) : {tokens_est:,} (char-based, ±30%)")
+        print(f"  ⚠️  Tokenizer officiel non trouvé dans {_TOKENIZER_DIR}")
+        print(f"     Pour un comptage exact: pip install transformers")
+    
+    print()
+    for model_name, p in PRICING.items():
+        tok_count = tokens_exact if exact else tokens_est
+        cost = tok_count * p["input_cache_miss"] / 1_000_000
+        print(f"  💰 {model_name:<22s} : {format_cost(cost)} (cache miss)")
+    print()
+
+
 def cmd_strategies():
     """Affiche les stratégies d'optimisation."""
     print("""
@@ -289,11 +383,19 @@ def cmd_strategies():
    └─ Éviter de changer le début des messages
 
 2. MINIMISER LES TOKENS DE RAISONNEMENT
-   ├─ Utiliser reasoning_effort="low" ou désactiver thinking
+   ├─ reasoning_effort="none" → thinking OFF (gratuit, utiliser pour Flash)
+   ├─ reasoning_effort="low"/"medium"/"high" → tous mappés à "high" (même coût)
+   ├─ reasoning_effort="xhigh"/"max" → max reasoning (le plus cher)
    ├─ Les tokens de raisonnement ne sont PAS cachables
-   └─ Coût : ~2-5x plus de tokens qu'une réponse normale
+   └─ Coût thinking : ~2-5x plus de tokens output (invisibles!)
 
-3. STRUCTURER LES PROMPTS
+3. ROUTAGE INTELLIGENT (Hermes profiles)
+   ├─ Profile eco : Flash + no thinking (80% du quotidien)
+   ├─ Profile default : Pro + thinking (tâches complexes)
+   ├─ Tâches auxiliaires (vision, compression...) → Flash (configuré)
+   └─ Subagents → Flash (configuré)
+
+4. STRUCTURER LES PROMPTS
    ├─ Placer le contenu statique AU DÉBUT (prefix matching)
    ├─ Placer le contenu variable À LA FIN
    ├─ Exemple :
@@ -301,51 +403,45 @@ def cmd_strategies():
    │   ❌ "Question: {{variable}}. Tu es un assistant. [static]"
    └─ Tout le préfixe avant la variable est cachable
 
-4. GÉRER LA MÉMOIRE (HERMES)
+5. GÉRER LA MÉMOIRE (HERMES)
    ├─ Hermes injecte la mémoire dans chaque tour
    ├─ Si la mémoire change → cache MISS
    ├─ Stratégie : mémoire compacte, rarement modifiée
    └─ Utiliser des clés de mémoire atomiques (1 ligne = 1 fait)
 
-5. COMPRESSER LE CONTEXTE
+6. COMPRESSER LE CONTEXTE
    ├─ max_tokens pour limiter la sortie
    ├─ Truncate l'historique (>20 tours → résumer)
    ├─ Supprimer les messages redondants
    └─ Utiliser JSON mode (plus compact que markdown)
 
-6. CACHE WARM-UP (nouveau)
+7. CACHE WARM-UP (nouveau)
    ├─ Le cache prend quelques secondes à construire
    ├─ Premier appel = toujours cache miss
    ├─ Attendre 2-3 secondes après le 1er appel avant le 2e
    └─ Le cache est auto-clear après heures/jours d'inactivité
 
-7. MESURER LE CACHE HIT RÉEL
+8. MESURER LE CACHE HIT RÉEL
    ├─ La réponse API contient prompt_cache_hit_tokens
    ├─ La réponse API contient prompt_cache_miss_tokens
    ├─ hit_rate = hit_tokens / (hit_tokens + miss_tokens)
    └─ Logger ces valeurs pour suivre l'efficacité réelle
 
-8. BEST-EFFORT (nuance importante)
+9. BEST-EFFORT (nuance importante)
    ├─ Le cache ne garantit PAS 100% de hit rate
-   ├─ Système \"best-effort\" — dépend de la charge serveur
+   ├─ Système "best-effort" — dépend de la charge serveur
    ├─ Les prefixes très longs peuvent ne pas être cachés
    └─ Toujours prévoir le pire cas (cache miss) dans le budget
 
-6. CHOISIR LE BON MODÈLE
-   ├─ deepseek-v4-flash : tâches simples, 3-5x moins cher
+10. CHOISIR LE BON MODÈLE
+   ├─ deepseek-v4-flash : tâches simples, 4x moins cher que Pro
    ├─ deepseek-v4-pro  : tâches complexes, raisonnement
    └─ Règle : flash pour 80% des appels, pro pour 20%
 
-7. BATCHING
+11. BATCHING
    ├─ Combiner plusieurs questions en un seul appel
    ├─ Au lieu de 3 appels de 1000 tokens → 1 appel de 2000
    └─ Économie : 3x moins de cache misses
-
-8. CHAT PREFIX COMPLETION (Beta)
-   ├─ Nouvelle feature DeepSeek (Beta)
-   ├─ Permet de pré-remplir la réponse de l'assistant
-   ├─ Utile pour forcer un format de sortie sans JSON mode
-   └─ Économise des tokens de raisonnement
 
 {'='*60}
   MESURE RÉELLE DU CACHE HIT
@@ -365,17 +461,30 @@ Hit rate réel = prompt_cache_hit_tokens / prompt_tokens
        "prompt_cache_miss_tokens":400,"completion_tokens":300}
 
 {'='*60}
-  ESTIMATION D'ÉCONOMIES (deepseek-v4-pro)
+  PRIX PROMO (jusqu'au 31/05/2026) vs NORMAL
 {'='*60}
 
-Sans optimisation (0% cache hit) :
-  1000 appels x 10K tokens = 10M tokens
-  Cout input: $4.35 (cache miss)
+                     PROMO (-75%)      NORMAL
+  Pro cache hit      $0.003625/M       $0.0145/M
+  Pro cache miss     $0.435/M          $1.74/M
+  Pro output         $0.87/M           $3.48/M
+  Flash (inchangé)   $0.14/M / $0.28/M
 
-Avec optimisation (80% cache hit) :
-  2M cache miss + 8M cache hit
-  Cout input: $0.90
-  Economie: environ 79%
+{'='*60}
+  HYPOTHÈSES DE ROUTAGE (Hermes)
+{'='*60}
+
+  Profil eco (Flash, no thinking):
+    Session 10 tours : ~$0.90
+    Économie vs Pro  : -68%
+
+  Profil default (Pro, thinking medium):
+    Session 10 tours : ~$2.80
+    Avec aux sur Flash: -15% sur le total
+
+  Mix 80% eco / 20% default :
+    Coût moyen / session : ~$1.28
+    Économie globale     : -54%
 
 """)
 
@@ -386,13 +495,20 @@ Avec optimisation (80% cache hit) :
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 optimizer.py <command> [args]")
-        print("Commands: simulate, compare, analyze, strategies, pricing")
+        print("Commands: simulate, compare, analyze, count, strategies, pricing")
         return
     
     cmd = sys.argv[1]
     
     if cmd == "strategies":
         cmd_strategies()
+    elif cmd == "count":
+        if len(sys.argv) < 3:
+            print("Usage: python3 optimizer.py count <text|filename>")
+            print("  Comptage exact avec le tokenizer officiel DeepSeek V3")
+            print(f"  Tokenizer: {_TOKENIZER_DIR}")
+            return
+        cmd_count(sys.argv[2])
     elif cmd == "pricing":
         print("\nDeepSeek API Pricing (per 1M tokens)\n")
         for model, p in PRICING.items():
